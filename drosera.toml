@@ -5,26 +5,24 @@ drosera_address = "0x91cB447BaFc6e0EA0F4Fe056F5a9b1F14bb06e5D"
 
 [traps]
 
-[traps.hello_world]
-path = "out/HelloWorldTrap.sol/HelloWorldTrap.json"
-response_contract = "0x183D78491555cb69B68d2354F7373cc2632508C7"
-response_function = "helloworld(string)"
+[traps.balance_monitor]
+path = "out/BalanceMonitorTrap.sol/BalanceMonitorTrap.json"
+response_contract = "0x25E2CeF36020A736CF8a4D2cAdD2EBE3940F4608"
+response_function = "respondWithDiscordName(string)"
 cooldown_period_blocks = 33
 min_number_of_operators = 1
 max_number_of_operators = 2
 block_sample_size = 10
 private_trap = true
-whitelist = []
+whitelist = ["0x689Ad0f9cBa2dA64039cF894E9fB3Aa6266861D8"]
 
-# Uncomment this to deploy the TransferEventTrap
-
-# [traps.transfer_event_trap]
-# path = "out/TransferEventTrap.sol/TransferEventTrap.json"
-# response_contract = "0x183D78491555cb69B68d2354F7373cc2632508C7"
-# response_function = "helloworld(string)"
-# cooldown_period_blocks = 33
-# min_number_of_operators = 1
-# max_number_of_operators = 2
-# block_sample_size = 10
-# private_trap = true
-# whitelist = []
+[traps.steth_depeg_sentinel]
+path = "out/StEthDepegSentinel.sol/StEthDepegSentinel.json"
+response_contract = "0x25E2CeF36020A736CF8a4D2cAdD2EBE3940F4608"
+response_function = "respondWithDiscordName(string)"
+cooldown_period_blocks = 33
+min_number_of_operators = 1
+max_number_of_operators = 2
+block_sample_size = 10
+private_trap = true
+whitelist = ["0x689Ad0f9cBa2dA64039cF894E9fB3Aa6266861D8"]

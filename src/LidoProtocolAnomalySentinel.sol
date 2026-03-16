@@ -3,26 +3,41 @@ pragma solidity ^0.8.20;
 import {ITrap} from "drosera-contracts/interfaces/ITrap.sol";
 
 /**
- * @title  Lido Protocol Anomaly Sentinel
+ * @title  Lido Protocol Anomaly Sentinel — v2
  * @author DAOmindbreaker
  * @notice Drosera Trap that monitors Lido protocol internal health metrics
- *         on Hoodi testnet and triggers when anomalous accounting behavior
- *         is detected across multiple consecutive block samples.
+ *         and triggers when anomalous accounting behavior is detected across
+ *         multiple consecutive block samples.
  *
  * @dev    This Trap monitors Lido-internal accounting state — NOT market prices.
  *         It detects on-chain anomalies such as:
- *           1. Abnormal drops in total pooled ETH (Check A)
- *           2. Sustained wstETH redemption rate drops (Check B)
- *           3. Share supply anomalies relative to pooled ETH (Check C)
+ *           Check A (id=1) — Pooled ETH collapse (CRITICAL)
+ *           Check B (id=2) — wstETH redemption rate drop (HIGH)
+ *           Check C (id=3) — stETH/wstETH rate consistency breach (HIGH)
  *
- *         For market depeg detection, a DEX/oracle-based Trap would be needed.
- *         This Trap is intentionally scoped to protocol-level accounting health.
+ * @dev    v2 improvements:
+ *         - Single handleAnomaly(uint8,uint256,uint256,uint256) entrypoint
+ *           so TOML wiring matches all check payloads correctly
+ *         - Authorization model fixed — no msg.sender check, Drosera protocol submits
+ *         - shouldAlert() added — 2 early warning signals before hard triggers
+ *         - Check C rewritten — monitors stETH/wstETH rate consistency instead
+ *           of shareRatioBps which is not a reliable anomaly signal
+ *         - Mainnet-ready — just swap addresses in constants
+ *
+ * @dev    All checks encode to:
+ *           abi.encode(uint8 checkId, uint256 a, uint256 b, uint256 c)
+ *         Matching TOML: response_function = "handleAnomaly(uint8,uint256,uint256,uint256)"
  *
  * Use Case: Liquid Restaking — Mitigating Depegs (dev.drosera.io/use-cases)
  *
- * Contracts monitored (Lido official on Hoodi testnet):
- *   stETH  : 0x3508A952176b3c15387C97BE809eaffB1982176a
- *   wstETH : 0x7E99eE3C66636DE415D2d7C880938F2f40f94De4
+ * Contracts monitored:
+ *   Testnet (Hoodi):
+ *     stETH  : 0x3508A952176b3c15387C97BE809eaffB1982176a
+ *     wstETH : 0x7E99eE3C66636DE415D2d7C880938F2f40f94De4
+ *
+ *   Mainnet (Ethereum):
+ *     stETH  : 0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84
+ *     wstETH : 0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0
  */
 
 // ─────────────────────────────────────────────
@@ -34,11 +49,15 @@ interface IStETH {
     function getTotalPooledEther() external view returns (uint256);
     /// @notice Total stETH shares in existence
     function getTotalShares() external view returns (uint256);
+    /// @notice ETH value of a given amount of shares
+    function getPooledEthByShares(uint256 sharesAmount) external view returns (uint256);
 }
 
 interface IWstETH {
     /// @notice ETH redeemable per 1e18 wstETH shares (redemption rate)
     function getPooledEthByShares(uint256 sharesAmount) external view returns (uint256);
+    /// @notice wstETH per stETH (how many wstETH you get for 1e18 stETH)
+    function getSharesByPooledEth(uint256 ethAmount) external view returns (uint256);
 }
 
 // ─────────────────────────────────────────────
@@ -47,14 +66,17 @@ interface IWstETH {
 
 /// @notice Snapshot of Lido protocol state at a given block sample
 struct LidoSnapshot {
-    /// @notice Total ETH pooled in Lido (in wei)
+    /// @notice Total ETH pooled in Lido (wei)
     uint256 totalPooledEther;
     /// @notice Total stETH shares outstanding
     uint256 totalShares;
-    /// @notice wstETH redemption rate: ETH per 1e18 shares (scaled 1e18)
+    /// @notice wstETH redemption rate: ETH per 1e18 wstETH shares (scaled 1e18)
     uint256 wstEthRate;
-    /// @notice Share-to-pooled ratio in basis points (10000 = 1.0000)
-    uint256 shareRatioBps;
+    /// @notice stETH internal rate: ETH per 1e18 stETH shares via stETH contract (scaled 1e18)
+    /// @dev    Used for Check C — cross-check stETH vs wstETH rate consistency
+    uint256 stEthInternalRate;
+    /// @notice Rate consistency delta in basis points (|wstEthRate - stEthInternalRate| / stEthInternalRate * BPS)
+    uint256 rateConsistencyBps;
     /// @notice True if all external calls succeeded
     bool valid;
 }
@@ -67,41 +89,57 @@ contract LidoProtocolAnomalySentinel is ITrap {
 
     // ── Constants ────────────────────────────
 
-    /// @notice Lido stETH proxy on Hoodi testnet
+    /// @notice Lido stETH proxy
+    /// @dev    Mainnet: 0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84
+    ///         Hoodi:   0x3508A952176b3c15387C97BE809eaffB1982176a
     address public constant STETH  = 0x3508A952176b3c15387C97BE809eaffB1982176a;
 
-    /// @notice Lido wstETH on Hoodi testnet
+    /// @notice Lido wstETH
+    /// @dev    Mainnet: 0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0
+    ///         Hoodi:   0x7E99eE3C66636DE415D2d7C880938F2f40f94De4
     address public constant WSTETH = 0x7E99eE3C66636DE415D2d7C880938F2f40f94De4;
 
-    /// @notice Minimum pooled ETH required before monitoring is meaningful
+    /// @notice Minimum pooled ETH before monitoring is meaningful
     uint256 public constant MIN_POOLED_ETH = 1 ether;
 
-    /// @notice Basis points denominator (10 000 bps = 100%)
+    /// @notice Basis points denominator
     uint256 public constant BPS_DENOM = 10_000;
 
-    /// @notice Alert if totalPooledEther drops by more than 5% (500 bps)
+    /// @notice Check A: trigger if totalPooledEther drops > 5% (500 bps)
     uint256 public constant POOLED_DROP_BPS = 500;
 
-    /// @notice Alert if wstETH redemption rate drops by more than 3% (300 bps)
+    /// @notice Check A alert: trigger alert if drop > 2% (200 bps)
+    uint256 public constant POOLED_DROP_ALERT_BPS = 200;
+
+    /// @notice Check B: trigger if wstETH rate drops > 3% (300 bps) sustained
     uint256 public constant RATE_DROP_BPS = 300;
 
-    /// @notice Alert if share ratio deviates by more than 10% (1000 bps)
-    uint256 public constant RATIO_DEVIATION_BPS = 1_000;
+    /// @notice Check B alert: trigger alert if wstETH rate drops > 1% (100 bps)
+    uint256 public constant RATE_DROP_ALERT_BPS = 100;
+
+    /// @notice Check C: trigger if stETH/wstETH rate inconsistency > 50 bps
+    /// @dev    stETH and wstETH should always agree on redemption rate.
+    ///         Any deviation > 0.5% signals accounting manipulation or oracle failure.
+    uint256 public constant RATE_CONSISTENCY_BPS = 50;
 
     // ── collect() ────────────────────────────
 
     /**
-     * @notice Collects a LidoSnapshot from both stETH and wstETH contracts.
-     * @dev    Uses try/catch on every external call so that a revert in the
-     *         monitored contracts never causes collect() itself to revert.
-     *         If any call fails the snapshot is marked invalid (valid = false)
-     *         and shouldRespond() will safely skip it.
+     * @notice Collects a LidoSnapshot from stETH and wstETH contracts.
+     * @dev    Every external call wrapped in try/catch. Any critical failure
+     *         marks the snapshot invalid and shouldRespond() safely skips it.
+     *
+     *         Check C data: stETH.getPooledEthByShares(1e18) gives the ETH
+     *         value of 1e18 stETH shares via stETH's own accounting.
+     *         wstETH.getPooledEthByShares(1e18) gives the same via wstETH.
+     *         Both should return identical values — any delta signals inconsistency.
+     *
      * @return ABI-encoded LidoSnapshot struct
      */
     function collect() external view returns (bytes memory) {
         LidoSnapshot memory snap;
 
-        // ── Fetch totalPooledEther ───────────
+        // ── Total pooled ETH ─────────────────
         try IStETH(STETH).getTotalPooledEther() returns (uint256 pooled) {
             snap.totalPooledEther = pooled;
         } catch {
@@ -109,7 +147,7 @@ contract LidoProtocolAnomalySentinel is ITrap {
             return abi.encode(snap);
         }
 
-        // ── Fetch totalShares ────────────────
+        // ── Total shares ─────────────────────
         try IStETH(STETH).getTotalShares() returns (uint256 shares) {
             snap.totalShares = shares;
         } catch {
@@ -117,7 +155,7 @@ contract LidoProtocolAnomalySentinel is ITrap {
             return abi.encode(snap);
         }
 
-        // ── Fetch wstETH redemption rate ─────
+        // ── wstETH redemption rate ───────────
         try IWstETH(WSTETH).getPooledEthByShares(1e18) returns (uint256 rate) {
             snap.wstEthRate = rate;
         } catch {
@@ -125,10 +163,23 @@ contract LidoProtocolAnomalySentinel is ITrap {
             return abi.encode(snap);
         }
 
-        // ── Derive share ratio in bps ────────
-        if (snap.totalPooledEther > 0) {
-            snap.shareRatioBps =
-                (snap.totalShares * BPS_DENOM) / snap.totalPooledEther;
+        // ── stETH internal rate (for Check C) ─
+        // stETH.getPooledEthByShares(1e18) returns ETH per 1e18 shares
+        // Must match wstETH rate — deviation = accounting inconsistency
+        try IStETH(STETH).getPooledEthByShares(1e18) returns (uint256 internalRate) {
+            snap.stEthInternalRate = internalRate;
+        } catch {
+            snap.valid = false;
+            return abi.encode(snap);
+        }
+
+        // ── Derive rate consistency delta ────
+        if (snap.stEthInternalRate > 0) {
+            uint256 delta = snap.wstEthRate > snap.stEthInternalRate
+                ? snap.wstEthRate - snap.stEthInternalRate
+                : snap.stEthInternalRate - snap.wstEthRate;
+
+            snap.rateConsistencyBps = (delta * BPS_DENOM) / snap.stEthInternalRate;
         }
 
         snap.valid = true;
@@ -139,20 +190,22 @@ contract LidoProtocolAnomalySentinel is ITrap {
 
     /**
      * @notice Analyses 3 consecutive LidoSnapshots for sustained anomalies.
-     * @dev    Three independent checks run in order of severity:
+     * @dev    All checks encode to handleAnomaly(uint8,uint256,uint256,uint256).
      *
-     *         Check A — Pooled ETH collapse
+     *         Check A (id=1) — Pooled ETH Collapse (CRITICAL)
      *           Immediate trigger if totalPooledEther drops > POOLED_DROP_BPS
-     *           versus the oldest sample. No mid-sample confirmation needed
-     *           because a 5%+ drop is already extreme.
+     *           vs oldest. No mid confirmation — 5%+ drop is already extreme.
+     *           Payload: (1, currentPooled, oldestPooled, dropBps)
      *
-     *         Check B — wstETH redemption rate drop
-     *           Triggers if rate drops > RATE_DROP_BPS from oldest to current
-     *           AND the mid-sample also shows a drop (sustained, not a spike).
+     *         Check B (id=2) — wstETH Rate Drop (HIGH)
+     *           Rate drops > RATE_DROP_BPS from oldest to current AND
+     *           mid also shows a drop (sustained, not a spike).
+     *           Payload: (2, currentRate, oldestRate, dropBps)
      *
-     *         Check C — Share ratio deviation
-     *           Triggers if shareRatioBps deviates > RATIO_DEVIATION_BPS in
-     *           BOTH mid and current samples (sustained divergence).
+     *         Check C (id=3) — Rate Consistency Breach (HIGH)
+     *           stETH and wstETH disagree on redemption rate by > RATE_CONSISTENCY_BPS
+     *           in both current and mid snapshots (sustained inconsistency).
+     *           Payload: (3, rateConsistencyBps, wstEthRate, stEthInternalRate)
      *
      * @param  data  ABI-encoded LidoSnapshot array (index 0 = newest)
      * @return (true, encodedPayload) if anomaly detected; (false, "") otherwise
@@ -167,12 +220,10 @@ contract LidoProtocolAnomalySentinel is ITrap {
         LidoSnapshot memory mid     = abi.decode(data[1], (LidoSnapshot));
         LidoSnapshot memory oldest  = abi.decode(data[2], (LidoSnapshot));
 
-        // Skip if any snapshot failed to collect
         if (!current.valid || !mid.valid || !oldest.valid) {
             return (false, bytes(""));
         }
 
-        // Skip if pooled ETH is below meaningful threshold
         if (current.totalPooledEther < MIN_POOLED_ETH ||
             oldest.totalPooledEther  < MIN_POOLED_ETH) {
             return (false, bytes(""));
@@ -181,8 +232,8 @@ contract LidoProtocolAnomalySentinel is ITrap {
         // ── Check A: Pooled ETH collapse ─────
         if (current.totalPooledEther < oldest.totalPooledEther) {
             uint256 dropBps =
-                ((oldest.totalPooledEther - current.totalPooledEther)
-                    * BPS_DENOM) / oldest.totalPooledEther;
+                ((oldest.totalPooledEther - current.totalPooledEther) * BPS_DENOM)
+                    / oldest.totalPooledEther;
 
             if (dropBps >= POOLED_DROP_BPS) {
                 return (true, abi.encode(
@@ -195,12 +246,10 @@ contract LidoProtocolAnomalySentinel is ITrap {
         }
 
         // ── Check B: wstETH rate drop ─────────
-        if (oldest.wstEthRate > 0 &&
-            current.wstEthRate < oldest.wstEthRate) {
-
+        if (oldest.wstEthRate > 0 && current.wstEthRate < oldest.wstEthRate) {
             uint256 rateDropBps =
-                ((oldest.wstEthRate - current.wstEthRate)
-                    * BPS_DENOM) / oldest.wstEthRate;
+                ((oldest.wstEthRate - current.wstEthRate) * BPS_DENOM)
+                    / oldest.wstEthRate;
 
             bool midAlsoDropped = mid.wstEthRate < oldest.wstEthRate;
 
@@ -214,23 +263,82 @@ contract LidoProtocolAnomalySentinel is ITrap {
             }
         }
 
-        // ── Check C: Share ratio deviation ───
-        if (oldest.shareRatioBps > 0) {
-            uint256 currentDev = current.shareRatioBps > oldest.shareRatioBps
-                ? current.shareRatioBps - oldest.shareRatioBps
-                : oldest.shareRatioBps - current.shareRatioBps;
+        // ── Check C: Rate consistency breach ──
+        // stETH and wstETH must agree on redemption rate.
+        // Sustained divergence signals accounting manipulation or oracle failure.
+        bool currentInconsistent = current.rateConsistencyBps >= RATE_CONSISTENCY_BPS;
+        bool midInconsistent     = mid.rateConsistencyBps     >= RATE_CONSISTENCY_BPS;
 
-            uint256 midDev = mid.shareRatioBps > oldest.shareRatioBps
-                ? mid.shareRatioBps - oldest.shareRatioBps
-                : oldest.shareRatioBps - mid.shareRatioBps;
+        if (currentInconsistent && midInconsistent) {
+            return (true, abi.encode(
+                uint8(3),
+                current.rateConsistencyBps,
+                current.wstEthRate,
+                current.stEthInternalRate
+            ));
+        }
 
-            if (currentDev >= RATIO_DEVIATION_BPS &&
-                midDev    >= RATIO_DEVIATION_BPS) {
+        return (false, bytes(""));
+    }
+
+    // ── shouldAlert() ─────────────────────────
+
+    /**
+     * @notice Early warning system — fires before shouldRespond() thresholds.
+     * @dev    Alert payloads use IDs 10-11.
+     *
+     *         Alert A (id=10) — Pooled ETH soft drop (> 2%, below 5% trigger)
+     *           Early signal before Check A hard trigger.
+     *           Payload: (10, currentPooled, midPooled, dropBps)
+     *
+     *         Alert B (id=11) — wstETH rate soft drop (> 1%, below 3% trigger)
+     *           Early signal before Check B hard trigger.
+     *           Payload: (11, currentRate, midRate, dropBps)
+     *
+     * @param  data  ABI-encoded LidoSnapshot array (index 0 = newest)
+     * @return (true, encodedPayload) if alert condition; (false, "") otherwise
+     */
+    function shouldAlert(
+        bytes[] calldata data
+    ) external pure returns (bool, bytes memory) {
+
+        if (data.length < 2) return (false, bytes(""));
+
+        LidoSnapshot memory current = abi.decode(data[0], (LidoSnapshot));
+        LidoSnapshot memory mid     = abi.decode(data[1], (LidoSnapshot));
+
+        if (!current.valid || !mid.valid) return (false, bytes(""));
+
+        // ── Alert A: Pooled ETH soft drop ────
+        if (current.totalPooledEther < mid.totalPooledEther &&
+            mid.totalPooledEther > 0) {
+
+            uint256 dropBps =
+                ((mid.totalPooledEther - current.totalPooledEther) * BPS_DENOM)
+                    / mid.totalPooledEther;
+
+            if (dropBps >= POOLED_DROP_ALERT_BPS) {
                 return (true, abi.encode(
-                    uint8(3),
-                    current.shareRatioBps,
-                    oldest.shareRatioBps,
-                    currentDev
+                    uint8(10),
+                    current.totalPooledEther,
+                    mid.totalPooledEther,
+                    dropBps
+                ));
+            }
+        }
+
+        // ── Alert B: wstETH rate soft drop ───
+        if (mid.wstEthRate > 0 && current.wstEthRate < mid.wstEthRate) {
+            uint256 alertDropBps =
+                ((mid.wstEthRate - current.wstEthRate) * BPS_DENOM)
+                    / mid.wstEthRate;
+
+            if (alertDropBps >= RATE_DROP_ALERT_BPS) {
+                return (true, abi.encode(
+                    uint8(11),
+                    current.wstEthRate,
+                    mid.wstEthRate,
+                    alertDropBps
                 ));
             }
         }

@@ -7,8 +7,8 @@ drosera_address = "0x91cB447BaFc6e0EA0F4Fe056F5a9b1F14bb06e5D"
 
 [traps.lido_anomaly_sentinel]
 path = "out/LidoProtocolAnomalySentinel.sol/LidoProtocolAnomalySentinel.json"
-response_contract = "0xD66D199B1583876D914B4ff2Bc2F14e5B64906ce"
-response_function = "recordPooledEthCollapse(uint256,uint256,uint256)"
+response_contract = "0x96181d6B1D01fF776d08C1Aa65edBF6556116c19"
+response_function = "handleAnomaly(uint8,uint256,uint256,uint256)"
 cooldown_period_blocks = 33
 min_number_of_operators = 1
 max_number_of_operators = 2

@@ -36,8 +36,8 @@ import {ITrap} from "drosera-contracts/interfaces/ITrap.sol";
  *     wstETH : 0x7E99eE3C66636DE415D2d7C880938F2f40f94De4
  *
  *   Mainnet (Ethereum):
- *     stETH  : 0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84
- *     wstETH : 0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0
+ *     stETH  : 0x3508A952176b3c15387C97BE809eaffB1982176a
+ *     wstETH : 0x7E99eE3C66636DE415D2d7C880938F2f40f94De4
  */
 
 // ─────────────────────────────────────────────
@@ -90,12 +90,12 @@ contract LidoProtocolAnomalySentinel is ITrap {
     // ── Constants ────────────────────────────
 
     /// @notice Lido stETH proxy
-    /// @dev    Mainnet: 0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84
+    /// @dev    Mainnet: 0x3508A952176b3c15387C97BE809eaffB1982176a
     ///         Hoodi:   0x3508A952176b3c15387C97BE809eaffB1982176a
     address public constant STETH  = 0x3508A952176b3c15387C97BE809eaffB1982176a;
 
     /// @notice Lido wstETH
-    /// @dev    Mainnet: 0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0
+    /// @dev    Mainnet: 0x7E99eE3C66636DE415D2d7C880938F2f40f94De4
     ///         Hoodi:   0x7E99eE3C66636DE415D2d7C880938F2f40f94De4
     address public constant WSTETH = 0x7E99eE3C66636DE415D2d7C880938F2f40f94De4;
 

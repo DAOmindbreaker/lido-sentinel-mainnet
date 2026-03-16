@@ -4,7 +4,6 @@ eth_chain_id = 560048
 drosera_address = "0x91cB447BaFc6e0EA0F4Fe056F5a9b1F14bb06e5D"
 
 [traps]
-
 [traps.lido_anomaly_sentinel]
 path = "out/LidoProtocolAnomalySentinel.sol/LidoProtocolAnomalySentinel.json"
 response_contract = "0x96181d6B1D01fF776d08C1Aa65edBF6556116c19"

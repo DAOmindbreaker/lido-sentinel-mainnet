@@ -95,9 +95,10 @@ contract LidoSentinelV3 is ITrap {
             snap.totalPooledEther = v;
         } catch { snap.valid = false; return abi.encode(snap); }
 
+        // totalShares: used by IDT signals in future versions
         try IStETH(STETH).getTotalShares() returns (uint256 v) {
             snap.totalShares = v;
-        } catch { snap.valid = false; return abi.encode(snap); }
+        } catch { /* non-critical */ }
 
         try IWstETH(WSTETH).getPooledEthByShares(1e18) returns (uint256 v) {
             snap.wstEthRate = v;
@@ -107,9 +108,10 @@ contract LidoSentinelV3 is ITrap {
             snap.stEthInternalRate = v;
         } catch { snap.valid = false; return abi.encode(snap); }
 
+        // bufferedEther: reserved for future liquidity buffer monitoring
         try IStETH(STETH).getBufferedEther() returns (uint256 v) {
             snap.bufferedEther = v;
-        } catch { snap.valid = false; return abi.encode(snap); }
+        } catch { /* non-critical */ }
 
         try IWithdrawalQueue(WITHDRAWAL_QUEUE).unfinalizedStETH() returns (uint256 v) {
             snap.unfinalizedStETH = v;

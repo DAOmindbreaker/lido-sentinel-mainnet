@@ -148,11 +148,12 @@ contract LidoProtocolAnomalySentinel is ITrap {
         }
 
         // ── Total shares ─────────────────────
+        // Note: totalShares collected for future use / struct compatibility
+        // Currently unused in detection logic — non-critical, skip on failure
         try IStETH(STETH).getTotalShares() returns (uint256 shares) {
             snap.totalShares = shares;
         } catch {
-            snap.valid = false;
-            return abi.encode(snap);
+            // Non-critical — continue without invalidating snapshot
         }
 
         // ── wstETH redemption rate ───────────
